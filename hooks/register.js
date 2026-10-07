@@ -5,13 +5,12 @@ const STEP_DOWN = { deep: 'standard', standard: 'light', light: 'light' }
 const LIMIT_PERCENT = 85 // step down one tier above this rate-limit usage
 const TAG = /\[tier:(light|standard|deep)\]/i
 const RETURN_RULE =
-  '\n\nWhen done, reply with a summary under 150 words: what you changed (files), ' +
-  'what you verified, open issues. No full file contents, no long logs.'
+  '\n\nAfter you finish the task above, reply with a summary under 150 words.'
 
 export function register(on) {
   on('agent.spawn', async ($, e, next) => {
-    // Forks always inherit the parent's model; leave them alone
-    if (e.fork) return next(e)
+    // Forks, teammates and workflow agents pass through untouched
+    if (e.fork || e.isTeammate || e.workflow) return next(e)
 
     let tier = e.prompt.match(TAG)?.[1]?.toLowerCase()
     let source = 'Plan'

@@ -11,6 +11,7 @@ The main session never switches model, so its prompt cache stays intact.
 
 ## Requirements
 Claude Code v2.1.287+ (mods).
+Known good with Claude Code 2.1.292.
 
 ## Try it
 ```
