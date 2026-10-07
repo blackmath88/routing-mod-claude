@@ -24,6 +24,13 @@ claude plugin validate ./routing-mod-claude
 /plugin install routing-mod@routing-mod-claude
 ```
 
+## New machine
+Clone this repository, then run:
+```
+./setup.sh
+./setup.sh --check
+```
+
 ## Recommended setup
 - Main model: `/model sonnet`
 - Advisor: `/advisor opus` (subagents inherit it when the pairing is valid)
