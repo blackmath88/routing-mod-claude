@@ -1,0 +1,6 @@
+{
+  "name": "routing-mod",
+  "version": "0.1.0",
+  "description": "Routes each subagent to Haiku, Sonnet or Opus by the [tier:...] tag from your plan. The main session never switches model, so its prompt cache stays intact.",
+  "author": { "name": "blackmath88" }
+}

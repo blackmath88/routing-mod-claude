@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "routing-mod-claude",
+  "owner": { "name": "blackmath88" },
+  "plugins": [
+    { "name": "routing-mod", "description": "Tier-based model routing for subagents", "source": "./" }
+  ]
+}
