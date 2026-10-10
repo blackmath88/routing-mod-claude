@@ -19,7 +19,8 @@ Goal: <one sentence>
 - Host needs: <none | named host/tool/login>; unavailable hosts are reported BLOCKED, never passed.
 
 ## Tasks
-Each task becomes one subagent. Keep the tags in the task line; the routing mod reads them.
+Each task becomes one subagent. Keep the tags in the task line; the executor puts them at the very start of the
+Agent prompt (only that leading block routes; tags quoted elsewhere are ignored; a malformed or conflicting block refuses the task).
 Tags: `[tier:light|standard|deep]` requested tier · `[min-tier:...]` floor, never routed below ·
 `[on-limit:step-down|keep|stop]` behaviour at >= 85 % rate-limit usage
 (security / architecture / review work defaults to `keep`; use `stop` where a weaker model is unacceptable).

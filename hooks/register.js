@@ -1,10 +1,15 @@
 // routing-mod: route subagents by tier. Main session is never switched (keeps its cache).
 //
-// Task tags (copied verbatim from the plan into the Agent prompt):
+// Routing contract: a run of [kind:value] tokens at the very START of the Agent prompt
+// (the engine offers no structured metadata on agent.spawn or the Agent tool, see docs/QUALIFICATION.md):
 //   [tier:light|standard|deep]          requested tier
 //   [min-tier:light|standard|deep]      floor: the effective tier is never below it
 //   [on-limit:step-down|keep|stop]      what happens at >= LIMIT_PERCENT usage
-// Security / architecture / review work defaults to on-limit:keep (never stepped down
+// Only that leading block is trusted. Tag-like text later in the prompt (quoted code, logs, retrieved
+// text) never affects routing and is left untouched. A malformed or conflicting leading block refuses
+// the spawn (fail closed). Keyword detection of security/architecture/review work is a routing
+// heuristic that can only RAISE quality (implicit floor, keep at the limit), never a security boundary.
+// Protected work defaults to on-limit:keep (never stepped down
 // silently). Every decision logs requested tier, effective tier, the model the engine
 // actually started (observed) and the usage state. Missing usage stays "unknown".
 
@@ -13,13 +18,11 @@ const ORDER = ['light', 'standard', 'deep']
 const rank = tier => ORDER.indexOf(tier)
 const STEP_DOWN = { deep: 'standard', standard: 'light', light: 'light' }
 export const LIMIT_PERCENT = 85 // step down one tier at or above this rate-limit usage
-const TAG = /\[tier:(light|standard|deep)\]/i
-const MIN_TAG = /\[min-tier:(light|standard|deep)\]/i
-const LIMIT_TAG = /\[on-limit:(step-down|keep|stop)\]/i
-const ALL_TAGS = /\[(?:tier|min-tier|on-limit):[a-z-]+\]/gi
 const PROTECTED = /\b(secur(?:e|ity|ing)|vulnerabilit(?:y|ies)|threat(?:-model)?s?|exploits?|pen-?test(?:ing)?|secrets?|credentials?|(?:auth|access|api|session|bearer|refresh)[- ]tokens?|permissions?|privacy|sandbox(?:ing|[- ]escape)|(?:sql|command|prompt|code|shell)[- ]injection|xss|csrf|ssrf|oauth|auth(?:n|z|entication|orization)?|crypto(?:graphy)?|architecture|architectural|review(?:s|er|ers|ing)?|audit(?:s|ing)?)\b/i
 const PROTECTED_FLOOR = 'standard' // protected work without [min-tier] or [tier] tags is never routed below this
-const ANY_TAG = /\[\s*(tier|min-tier|on-limit)\s*:\s*([^\]]*)\]/gi
+const ANY_TAG = /\[\s*(tier|min-tier|on-limit)\s*:\s*([^\]]*)\]/gi // only used to COUNT ignored tag-like text
+const LEAD_TOKEN = /^\s*\[([^\]:\n]+):([^\]\n]*)\]/ // one [kind:value] token at the current start
+const VALUES = { tier: ORDER, 'min-tier': ORDER, 'on-limit': ['step-down', 'keep', 'stop'] }
 const RETURN_RULE =
   '\n\nWhen done, reply with a summary under 150 words: what you changed (files), ' +
   'what you verified, open issues. No full file contents, no long logs.'
@@ -31,27 +34,24 @@ export function tierOfModel(model) {
   return m.includes('haiku') ? 'light' : m.includes('sonnet') ? 'standard' : m.includes('opus') ? 'deep' : undefined
 }
 
-/** Tags in a task prompt, and the prompt without them. */
+/**
+ * The leading routing contract and the task text after it. Every leading [kind:value] token belongs to
+ * the contract: an unknown kind or value is `malformed`, two different values of one kind a `conflict`
+ * (both refuse the spawn). Nothing after the block is parsed; `ignored` counts tag-like strings there.
+ */
 export function parseTags(prompt) {
-  const p = String(prompt ?? '')
-  const found = { tier: new Set(), 'min-tier': new Set(), 'on-limit': new Set() }
-  const malformed = []
-  for (const m of p.matchAll(ANY_TAG)) {
-    const kind = m[1].toLowerCase(); const v = m[2].trim().toLowerCase()
-    const ok = kind === 'on-limit' ? ['step-down', 'keep', 'stop'].includes(v) : ORDER.includes(v)
-    ok ? found[kind].add(v) : malformed.push(m[0])
+  let rest = String(prompt ?? '')
+  const found = {}; const malformed = []; const conflicts = []
+  for (let m; (m = rest.match(LEAD_TOKEN)); rest = rest.slice(m[0].length)) {
+    const kind = m[1].trim().toLowerCase(); const v = m[2].trim().toLowerCase()
+    if (!Object.hasOwn(VALUES, kind) || !VALUES[kind].includes(v)) { malformed.push(m[0].trim()); continue }
+    if (found[kind] && found[kind] !== v) conflicts.push(`${kind}: ${found[kind]}/${v}`)
+    found[kind] ??= v
   }
-  const conflicts = Object.entries(found).filter(([, v]) => v.size > 1).map(([k, v]) => `${k}: ${[...v].join('/')}`)
-  const pick = (k, strongest) => !found[k].size ? undefined : strongest ? [...found[k]].sort((a, b) => rank(b) - rank(a))[0] : [...found[k]][0]
-  return {
-    tier: pick('tier', true),
-    floor: pick('min-tier', true), // conflicting floors: the strictest wins
-    onLimit: found['on-limit'].has('stop') ? 'stop' : found['on-limit'].has('keep') ? 'keep' : pick('on-limit'),
-    malformed, conflicts,
-    clean: p.replace(ANY_TAG, '').trim(),
-  }
+  const clean = rest.trim()
+  return { tier: found.tier, floor: found['min-tier'], onLimit: found['on-limit'], malformed, conflicts,
+    ignored: [...clean.matchAll(ANY_TAG)].length, clean }
 }
-
 /**
  * `$.session.usage().rateLimits` -> { state: 'known', percent, kind } for the fullest window,
  * or { state: 'unknown', why }. An empty list (off a subscription, no reading yet) is unknown,
@@ -78,13 +78,13 @@ export function decide(input) {
   // An explicit [tier] tag is the plan author's choice and beats the keyword-based implicit floor.
   const implicitFloor = !floor && !t.tier && isProtected
   if (implicitFloor) { floor = PROTECTED_FLOOR; reasons.push(`protected work: implicit floor ${PROTECTED_FLOOR}`) }
-  if (t.conflicts.length) reasons.push(`conflicting tags (${t.conflicts.join('; ')}): strictest used`)
+  if (t.ignored) reasons.push(`${t.ignored} tag-like string(s) in the task text ignored (only the leading block routes)`)
   const base = { floor, onLimit: t.onLimit, usage, reasons }
-  if (t.malformed.some(m => /min-tier|on-limit/i.test(m))) {
+  if (t.malformed.length || t.conflicts.length) {
     return { ...base, action: 'deny', requested: { tier: t.tier, source: 'tag' }, effective: undefined,
-      deny: `routing-mod: unrecognised routing tag ${t.malformed.join(' ')}; fix it (tiers: light|standard|deep; on-limit: step-down|keep|stop) rather than run without its floor/limit policy.` }
+      deny: `routing-mod: invalid routing contract at the start of the prompt (${[...t.malformed.map(m => `unrecognised ${m}`), ...t.conflicts.map(c => `conflicting ${c}`)].join('; ')}). ` +
+        'Fix the leading tags (tier/min-tier: light|standard|deep; on-limit: step-down|keep|stop); not started.' }
   }
-  if (t.malformed.length) reasons.push(`unrecognised tag ${t.malformed.join(' ')} ignored`)
 
   // Forks inherit the parent's model; the engine ignores a model rewrite. A floor can only be checked.
   if (input.fork) {
@@ -171,7 +171,7 @@ export function register(on) {
     // run unrouted; anything else proceeds on the engine's own choice. A failure after next() returns its result.
     const t = parseTags(e.prompt)
     // next is replay-safe in .catch (engine contract): when called, next(e) resolves to the first result, it does not spawn again.
-    const guarded = t.floor || t.onLimit === 'stop' || t.malformed.some(m => /min-tier|on-limit/i.test(m)) || (!t.tier && PROTECTED.test(`${e.description}\n${t.clean}`))
+    const guarded = t.floor || t.onLimit === 'stop' || t.malformed.length || t.conflicts.length || (!t.tier && PROTECTED.test(`${e.description}\n${t.clean}`))
     try { $.ui.log(`${e.description} · routing-mod FAILED: ${next.called ? 'after spawn' : guarded ? 'spawn refused (floor/stop/protected)' : 'spawn left unrouted (engine default model)'}`) } catch {}
     if (next.called) return next(e)
     return guarded ? { deny: 'routing-mod: routing failed for a task with a quality floor, on-limit:stop or protected (security/architecture/review) work; not started unrouted.' } : next(e)
