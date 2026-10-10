@@ -1,4 +1,4 @@
 {
-  "description": "agent.spawn: picks the subagent's model from its [tier:...] tag (or a Haiku classification), steps down near rate limits, adds a short-summary rule",
+  "description": "agent.spawn: picks the subagent's model from its [tier:...] tag (or a Haiku classification), honours [min-tier]/[on-limit] near rate limits, logs requested vs observed model, adds a short-summary rule",
   "modules": ["./register.js"]
 }
