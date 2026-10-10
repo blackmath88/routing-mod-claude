@@ -33,6 +33,7 @@ A second same-model delta pass on `f3c70a4` returned REVISE: implicit floor over
 - Tag-like text after the block is never parsed and never stripped (quoted code stays byte-identical); the log counts it as ignored.
 - Fail closed: an unknown kind or value, or two different values for one kind, in the leading block refuses the spawn, and refuses again in `.catch` if routing itself fails.
 - Trust anchor: the leading block is whatever the dispatching session writes first. If that session copies untrusted text into the start of a prompt, the text is trusted. The CLAUDE snippet tells it not to; nothing in the hook can enforce it.
+- Untagged tasks are classified by a model reading the task text, which may include untrusted text: such text can steer an untagged task to a cheaper tier (bounded below by the keyword floor when it applies). Only an explicit leading `[min-tier]` guarantees a floor.
 - Keyword detection of protected work is a routing heuristic, not a security boundary: it only raises (implicit floor `standard`, `keep` at the limit) and any task text can trigger or evade it.
 - Tests: `tests/route.test.mjs` cover code, log and retrieved-text injection, fail-closed contracts, a floor that survives high usage and every policy, explicit low models, and routing errors; `tests/engine.test.ts` repeats the core cases on the real engine.
 
