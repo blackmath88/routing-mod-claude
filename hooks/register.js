@@ -10,18 +10,20 @@
 
 export const TIERS = { light: 'haiku', standard: 'sonnet', deep: 'opus' }
 const ORDER = ['light', 'standard', 'deep']
+const rank = tier => ORDER.indexOf(tier)
 const STEP_DOWN = { deep: 'standard', standard: 'light', light: 'light' }
 export const LIMIT_PERCENT = 85 // step down one tier at or above this rate-limit usage
 const TAG = /\[tier:(light|standard|deep)\]/i
 const MIN_TAG = /\[min-tier:(light|standard|deep)\]/i
 const LIMIT_TAG = /\[on-limit:(step-down|keep|stop)\]/i
 const ALL_TAGS = /\[(?:tier|min-tier|on-limit):[a-z-]+\]/gi
-const PROTECTED = /\b(security|vulnerabilit(?:y|ies)|threat|exploit|secrets?|credentials?|permissions?|auth(?:n|z|entication|orization)?|crypto(?:graphy)?|architecture|architectural|review|audit)\b/i
+const PROTECTED = /\b(secur(?:e|ity|ing)|vulnerabilit(?:y|ies)|threat(?:-model)?s?|exploits?|pen-?test(?:ing)?|secrets?|credentials?|tokens?|permissions?|privacy|sandbox(?:ing)?|injection|xss|csrf|ssrf|oauth|auth(?:n|z|entication|orization)?|crypto(?:graphy)?|architecture|architectural|review(?:s|er|ers|ing)?|audit(?:s|ing)?)\b/i
+const PROTECTED_FLOOR = 'standard' // protected work without an explicit [min-tier] is never routed below this
+const ANY_TAG = /\[\s*(tier|min-tier|on-limit)\s*:\s*([^\]]*)\]/gi
 const RETURN_RULE =
   '\n\nWhen done, reply with a summary under 150 words: what you changed (files), ' +
   'what you verified, open issues. No full file contents, no long logs.'
 
-const rank = tier => ORDER.indexOf(tier)
 
 /** Tier of a model alias or id (haiku/sonnet/opus anywhere in it); undefined when unknown. */
 export function tierOfModel(model) {
@@ -32,11 +34,21 @@ export function tierOfModel(model) {
 /** Tags in a task prompt, and the prompt without them. */
 export function parseTags(prompt) {
   const p = String(prompt ?? '')
+  const found = { tier: new Set(), 'min-tier': new Set(), 'on-limit': new Set() }
+  const malformed = []
+  for (const m of p.matchAll(ANY_TAG)) {
+    const kind = m[1].toLowerCase(); const v = m[2].trim().toLowerCase()
+    const ok = kind === 'on-limit' ? ['step-down', 'keep', 'stop'].includes(v) : ORDER.includes(v)
+    ok ? found[kind].add(v) : malformed.push(m[0])
+  }
+  const conflicts = Object.entries(found).filter(([, v]) => v.size > 1).map(([k, v]) => `${k}: ${[...v].join('/')}`)
+  const pick = (k, strongest) => !found[k].size ? undefined : strongest ? [...found[k]].sort((a, b) => rank(b) - rank(a))[0] : [...found[k]][0]
   return {
-    tier: p.match(TAG)?.[1]?.toLowerCase(),
-    floor: p.match(MIN_TAG)?.[1]?.toLowerCase(),
-    onLimit: p.match(LIMIT_TAG)?.[1]?.toLowerCase(),
-    clean: p.replace(ALL_TAGS, '').trim(),
+    tier: pick('tier', true),
+    floor: pick('min-tier', true), // conflicting floors: the strictest wins
+    onLimit: found['on-limit'].has('stop') ? 'stop' : found['on-limit'].has('keep') ? 'keep' : pick('on-limit'),
+    malformed, conflicts,
+    clean: p.replace(ANY_TAG, '').trim(),
   }
 }
 
@@ -60,14 +72,23 @@ export function summarizeUsage(rateLimits) {
 export function decide(input) {
   const t = parseTags(input.prompt)
   const usage = input.usage ?? { state: 'unknown', why: 'not read' }
-  const floor = t.floor
   const reasons = []
+  const isProtected = PROTECTED.test(`${input.description ?? ''}\n${t.clean}`)
+  let floor = t.floor
+  if (!floor && isProtected) { floor = PROTECTED_FLOOR; reasons.push(`protected work: implicit floor ${PROTECTED_FLOOR}`) }
+  if (t.conflicts.length) reasons.push(`conflicting tags (${t.conflicts.join('; ')}): strictest used`)
   const base = { floor, onLimit: t.onLimit, usage, reasons }
+  if (t.malformed.some(m => /min-tier|on-limit/i.test(m))) {
+    return { ...base, action: 'deny', requested: { tier: t.tier, source: 'tag' }, effective: undefined,
+      deny: `routing-mod: unrecognised routing tag ${t.malformed.join(' ')}; fix it (tiers: light|standard|deep; on-limit: step-down|keep|stop) rather than run without its floor/limit policy.` }
+  }
+  if (t.malformed.length) reasons.push(`unrecognised tag ${t.malformed.join(' ')} ignored`)
 
   // Forks inherit the parent's model; the engine ignores a model rewrite. A floor can only be checked.
   if (input.fork) {
     const pt = tierOfModel(input.parentModel)
     const requested = { tier: pt, source: 'fork (inherits parent)' }
+    if (t.tier) reasons.push(`fork: its [tier:${t.tier}] cannot apply (forks inherit)`)
     if (floor && (pt === undefined || rank(pt) < rank(floor))) {
       return { ...base, action: 'deny', requested, effective: pt,
         deny: `routing-mod: a fork inherits ${input.parentModel ?? 'an unknown model'} (tier ${pt ?? 'unknown'}), below [min-tier:${floor}]. Dispatch it as a non-fork agent.` }
@@ -79,11 +100,11 @@ export function decide(input) {
   if (!t.tier && input.model) {
     const mt = tierOfModel(input.model)
     const requested = { tier: mt, source: `explicit model ${input.model}` }
-    if (floor && mt !== undefined && rank(mt) < rank(floor)) {
-      reasons.push(`explicit model below [min-tier:${floor}]: raised`)
+    if (floor && (mt === undefined || rank(mt) < rank(floor))) {
+      reasons.push(`explicit model ${mt === undefined ? 'of unknown tier' : 'below the floor'}: raised to ${floor}`)
       return { ...base, action: 'route', requested, effective: floor, model: TIERS[floor], prompt: t.clean + RETURN_RULE }
     }
-    if (floor && mt === undefined) reasons.push(`explicit model tier unknown; [min-tier:${floor}] not verifiable`)
+    reasons.push('explicit model: limit policy not applied')
     return { ...base, action: 'pass', requested, effective: mt, model: input.model }
   }
 
@@ -100,16 +121,16 @@ export function decide(input) {
   if (usage.state !== 'known') {
     reasons.push(`usage unknown (${usage.why ?? 'unavailable'}): no limit protection applied`)
   } else if (usage.percent >= LIMIT_PERCENT && effective !== STEP_DOWN[effective]) {
-    const isProtected = PROTECTED.test(`${input.description ?? ''}\n${t.clean}`)
     const target = STEP_DOWN[effective]
     let policy = t.onLimit ?? (isProtected ? 'keep' : 'step-down')
-    if (policy === 'step-down' && floor && rank(target) < rank(floor)) policy = 'keep'
+    let why = t.onLimit ? `[on-limit:${t.onLimit}]` : isProtected ? 'protected work' : ''
+    if (policy === 'step-down' && floor && rank(target) < rank(floor)) { policy = 'keep'; why = `floor ${floor}` }
     const at = `${usage.kind} ${usage.percent}% >= ${LIMIT_PERCENT}%`
     if (policy === 'stop') {
       return { ...base, action: 'deny', requested, effective,
         deny: `routing-mod: ${at}; this task requires tier ${effective} and is tagged [on-limit:stop]. Not started; retry after the window resets or decide explicitly.` }
     }
-    if (policy === 'keep') reasons.push(`${at}: kept ${effective} (${t.onLimit ? '[on-limit:keep]' : floor ? 'floor' : 'protected work'}), no downgrade`)
+    if (policy === 'keep') reasons.push(`${at}: kept ${effective} (${why}), no downgrade`)
     else { reasons.push(`${at}: DOWNGRADED ${effective} -> ${target}`); effective = target }
   }
   return { ...base, action: 'route', requested, effective, model: TIERS[effective], prompt: t.clean + RETURN_RULE }
@@ -118,7 +139,7 @@ export function decide(input) {
 /** One log line: requested vs effective vs observed, usage state and reasons. */
 export function describe(d, description, observedModel) {
   const ot = tierOfModel(observedModel)
-  const mismatch = observedModel && d.effective && ot !== d.effective ? ' [OBSERVED != EFFECTIVE]' : ''
+  const mismatch = !observedModel ? '' : !d.effective || !ot ? ' [tier unverifiable]' : ot !== d.effective ? ' [OBSERVED != EFFECTIVE]' : ''
   const usage = d.usage.state === 'known' ? `${d.usage.kind} ${d.usage.percent}%` : 'unknown'
   return `${description} · requested ${d.requested.tier ?? 'unknown'} (${d.requested.source}) → effective ${d.effective ?? 'unknown'} (${d.model ?? 'n/a'}) · observed ${observedModel ?? 'n/a'}${mismatch} · usage ${usage}` +
     (d.reasons.length ? ` · ${d.reasons.join('; ')}` : '') + (d.deny ? ` · DENIED` : '')
@@ -140,11 +161,15 @@ export function register(on) {
     const d = decide({ prompt: e.prompt, description: e.description, model: e.model, fork: e.fork, parentModel: e.parentModel, classified, usage })
     if (d.action === 'deny') { $.ui.log(describe(d, e.description)); return { deny: d.deny } }
     const result = await next(d.action === 'pass' ? e : { ...e, model: d.model, prompt: d.prompt })
-    if (!result.deny) $.ui.log(describe(d, e.description, result.model))
+    try { $.ui.log(result?.deny ? `${describe(d, e.description)} · DENIED by engine: ${result.deny}` : describe(d, e.description, result?.model)) } catch {}
     return result
   }).catch(($, e, next) => {
-    // A routing failure is reported, never silent: the spawn proceeds unrouted (the engine's own choice).
-    try { $.ui.log(`${e.description} · routing-mod FAILED: spawn left unrouted (engine default model)`) } catch {}
-    return next(e)
+    // A routing failure is reported, never silent. A task with a floor or [on-limit:stop] is refused rather than
+    // run unrouted; anything else proceeds on the engine's own choice. A failure after next() returns its result.
+    const t = parseTags(e.prompt)
+    const guarded = t.floor || t.onLimit === 'stop' || t.malformed.length || PROTECTED.test(`${e.description}\n${t.clean}`)
+    try { $.ui.log(`${e.description} · routing-mod FAILED: ${next.called ? 'after spawn' : guarded ? 'spawn refused (floor/stop/protected)' : 'spawn left unrouted (engine default model)'}`) } catch {}
+    if (next.called) return next(e)
+    return guarded ? { deny: 'routing-mod: routing failed for a task with a quality floor or on-limit:stop; not started unrouted.' } : next(e)
   })
 }

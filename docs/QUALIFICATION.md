@@ -11,8 +11,8 @@ Status of the routing hook for use by the shared mobile queue. Kinds: **verified
 - The repo's README/LIFECYCLE still name 2.1.287 as known-good; nothing was run on that version.
 
 ## Tests
-- `node --test tests/*.test.mjs` — the routing decision (explicit tiers, classification and its fallback, explicit model, forks, floors, `on-limit` policies, unknown usage, the 85 % boundary, requested/effective/observed log line) and the hook wiring with a fake `$`.
-- `claude plugin test .` — `tests/engine.test.ts` against the real engine, with the classifier, usage, log and spawn stubbed beneath the plugin: routing to opus, no downgrade for security review at 92 %, visible downgrade for ordinary work, `on-limit:stop` refusal, empty `rateLimits` = unknown, classifier and explicit model, observed-model mismatch flag.
+- `node --test tests/*.test.mjs` (15 tests) — the routing decision (explicit tiers, classification and its fallback, explicit model, forks, floors, `on-limit` policies, unknown usage, the 85 % boundary, requested/effective/observed log line) and the hook wiring with a fake `$`.
+- `claude plugin test .` (8 tests, run in this container) — `tests/engine.test.ts` against the real engine, with the classifier, usage, log and spawn stubbed beneath the plugin: routing to opus, no downgrade for security review at 92 %, visible downgrade for ordinary work, `on-limit:stop` refusal, empty `rateLimits` = unknown, classifier and explicit model, observed-model mismatch flag.
 - **Fork:** the test kit's `$.agent.spawn` cannot raise a real fork (`fork` arrives undefined), so fork handling is covered only by the Node tests with a fake engine.
 
 ## Not verified
@@ -21,4 +21,7 @@ Status of the routing hook for use by the shared mobile queue. Kinds: **verified
 - Cost or savings of routing: none measured, none claimed.
 
 ## Proposal (syntax)
-`[tier:X]`, `[min-tier:X]`, `[on-limit:step-down|keep|stop]` in the task line, copied verbatim into the Agent prompt (see `templates/PLAN.md`, `templates/CLAUDE-snippet.md`). The protected-work keyword list (security, threat, exploit, secret, credential, permission, auth*, crypto*, architecture, review, audit) only changes the default at the limit from `step-down` to `keep`; explicit tags override it.
+`[tier:X]`, `[min-tier:X]`, `[on-limit:step-down|keep|stop]` in the task line, copied verbatim into the Agent prompt (see `templates/PLAN.md`, `templates/CLAUDE-snippet.md`). Protected work is keyword-matched (the list is `PROTECTED` in `hooks/register.js`, vulnerability included); without an explicit `[min-tier]` it gets an implicit floor `standard` and `keep` at the limit. Explicit tags override the limit default; a stricter explicit floor wins. Keyword matching can misfire both ways.
+
+## Supplementary review (not independent)
+A same-model, context-isolated read-only pass on `8460d6c` returned REVISE (2 High, 4 Medium, 8 Low). Fixed in the next commit with tests: widened keywords, implicit floor for protected work (explicit model and classifier paths), unknown model under a floor raised, malformed floor/limit tags refused, conflicting tags logged (strictest wins), `.catch` refuses guarded tasks and never re-spawns after `next()`, engine denials logged, accurate keep reason, unverifiable observed tier flagged, fork tag noted. Open: `percentUsed` scale (0–100 per the types) untested against a live engine; tags quoted inside code text are still honoured.

@@ -34,7 +34,8 @@ test('explicit model below [min-tier] is raised; an unknown model id is passed a
   const r = d('[min-tier:deep] review auth', { model: 'sonnet' })
   assert.equal(r.action, 'route'); assert.equal(r.model, 'opus'); assert.match(r.reasons.join(), /raised/)
   const u = d('[min-tier:deep] x', { model: 'some-other-model' })
-  assert.equal(u.action, 'pass'); assert.match(u.reasons.join(), /not verifiable/)
+  assert.equal(u.action, 'route'); assert.equal(u.model, 'opus'); assert.match(u.reasons.join(), /unknown tier: raised/)
+  assert.match(d('x', { model: 'opus' }).reasons.join(), /limit policy not applied/)
 })
 
 test('forks pass untouched (they inherit), unless a floor the parent model cannot meet', () => {
@@ -97,7 +98,8 @@ test('requested vs effective vs observed are all in the log line, mismatch flagg
 })
 
 test('helpers', () => {
-  assert.deepEqual(parseTags('[TIER:Deep] [min-tier:standard] [on-limit:stop] go'), { tier: 'deep', floor: 'standard', onLimit: 'stop', clean: 'go' })
+  assert.deepEqual(parseTags('[TIER:Deep] [min-tier:standard] [on-limit:stop] go'), { tier: 'deep', floor: 'standard', onLimit: 'stop', malformed: [], conflicts: [], clean: 'go' })
+  assert.equal(parseTags('[tier: deep ] x').tier, 'deep')
   assert.equal(tierOfModel('claude-opus-5-5'), 'deep'); assert.equal(tierOfModel('gpt-x'), undefined)
 })
 
@@ -131,4 +133,37 @@ test('hook registers a .catch that logs the failure and proceeds unrouted', asyn
   const logs = []
   const r = await fallback({ ui: { log: t => logs.push(t) } }, { description: 'task', prompt: '[tier:deep] x' }, async e => ({ model: 'inherited', e }))
   assert.equal(r.model, 'inherited'); assert.match(logs[0], /routing-mod FAILED/)
+})
+
+test('review findings: protected keywords, implicit floor, malformed and conflicting tags', () => {
+  for (const p of ['secure the login flow', 'pentest the API', 'reviewer pass', 'fix XSS', 'CSRF token check', 'SQL injection', 'sandbox escape', 'OAuth scopes', 'privacy filter', 'threat-model the queue'])
+    assert.equal(d(`[tier:deep] ${p}`, { usage: known(90) }).effective, 'deep', p)
+  const a = d('security audit', { model: 'haiku' })
+  assert.equal(a.action, 'route'); assert.equal(a.effective, 'standard')
+  assert.equal(d('security audit', { classified: 'light' }).effective, 'standard')
+  assert.equal(d('list files', { classified: 'light' }).effective, 'light')
+  const m = d('[min-tier:standrd] tidy', { usage: known(90) })
+  assert.equal(m.action, 'deny'); assert.match(m.deny, /unrecognised routing tag/)
+  assert.match(d('[tier:huge] tidy').reasons.join(), /unrecognised tag/)
+  const c = d('[tier:light][tier:deep][on-limit:step-down][on-limit:stop] tidy', { usage: known(90) })
+  assert.equal(c.action, 'deny'); assert.match(c.reasons.join(), /conflicting tags/)
+  assert.match(d('[tier:deep][min-tier:deep][on-limit:step-down] tidy', { usage: known(95) }).reasons.join(), /kept deep \(floor deep\)/)
+  assert.match(d('[tier:deep] x', { fork: true, parentModel: 'opus' }).reasons.join(), /forks inherit/)
+  assert.match(describe(d('x', { model: 'custom-model' }), 't', 'custom-model'), /tier unverifiable/)
+})
+
+test('review findings: .catch refuses guarded tasks, never re-spawns after next(), logs engine denials', async () => {
+  let fallback; register(() => ({ catch: c => { fallback = c } }))
+  const logs = []; const $ = { ui: { log: t => logs.push(t) } }
+  let calls = 0; const next = async () => { calls++; return { model: 'x' } }
+  const g = await fallback($, { description: 't', prompt: '[min-tier:deep] x' }, next)
+  assert.ok(g.deny); assert.equal(calls, 0)
+  const after = Object.assign(async () => { calls++; return { model: 'x' } }, { called: true })
+  await fallback($, { description: 't', prompt: 'x' }, after); assert.match(logs.at(-1), /after spawn/)
+  const den = await spawn({ prompt: '[tier:deep] x' }, { usage: [] }).catch(e => e)
+  assert.ok(den.logs)
+  let hook; register((ev, h) => { hook = h; return { catch() {} } })
+  const lg = []; await hook({ model: { classify: async () => {} }, session: { usage: async () => ({ rateLimits: [] }) }, ui: { log: t => lg.push(t) } },
+    { description: 't', prompt: '[tier:deep] x', fork: false }, async () => ({ deny: 'engine said no' }))
+  assert.match(lg[0], /DENIED by engine: engine said no/)
 })
