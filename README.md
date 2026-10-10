@@ -15,10 +15,11 @@ Every subagent is told to return a summary under 150 words.
   Default: `step-down` one tier, **except** protected work, which defaults to `keep`.
   `stop` refuses the spawn instead of running it on a weaker model.
 - Protected work is recognised by **keywords** in the description or prompt (security/secure, vulnerability, threat,
-  exploit, pentest, secret, credential, token, permission, privacy, sandbox, injection, XSS, CSRF, SSRF, OAuth, auth*,
-  crypto*, architecture, review, audit). Without an explicit `[min-tier]` it gets an implicit floor of `standard`
-  (a cheaper explicit model or classification is raised) and `keep` at the limit. Keywords can misfire either way;
-  tag such tasks explicitly.
+  exploit, pentest, secret, credential, auth/access/API/session tokens, permission, privacy, sandboxing/sandbox escape,
+  SQL/command/prompt/code/shell injection, XSS, CSRF, SSRF, OAuth, auth*, crypto*, architecture, review, audit).
+  It defaults to `keep` at the limit. Without any `[tier]`/`[min-tier]` tag it also gets an implicit floor of
+  `standard` (a cheaper explicit model or classification is raised; an explicit model of unknown tier is kept and
+  logged). An explicit `[tier]` tag beats the implicit floor. Keywords can misfire either way; tag such tasks explicitly.
 - A misspelled `[min-tier:...]` / `[on-limit:...]` tag refuses the spawn (fix the tag); an unknown `[tier:...]` value
   is ignored and logged. Conflicting tags resolve to the strictest and are logged.
 - If routing itself fails, a task with a floor, `[on-limit:stop]` or protected keywords is refused; anything else runs

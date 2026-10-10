@@ -35,7 +35,7 @@ test('explicit model below [min-tier] is raised; an unknown model id is passed a
   assert.equal(r.action, 'route'); assert.equal(r.model, 'opus'); assert.match(r.reasons.join(), /raised/)
   const u = d('[min-tier:deep] x', { model: 'some-other-model' })
   assert.equal(u.action, 'route'); assert.equal(u.model, 'opus'); assert.match(u.reasons.join(), /unknown tier: raised/)
-  assert.match(d('x', { model: 'opus' }).reasons.join(), /limit policy not applied/)
+  assert.match(d('x', { model: 'opus', usage: known(90) }).reasons.join(), /limit policy not applied/)
 })
 
 test('forks pass untouched (they inherit), unless a floor the parent model cannot meet', () => {
@@ -158,12 +158,29 @@ test('review findings: .catch refuses guarded tasks, never re-spawns after next(
   let calls = 0; const next = async () => { calls++; return { model: 'x' } }
   const g = await fallback($, { description: 't', prompt: '[min-tier:deep] x' }, next)
   assert.ok(g.deny); assert.equal(calls, 0)
-  const after = Object.assign(async () => { calls++; return { model: 'x' } }, { called: true })
-  await fallback($, { description: 't', prompt: 'x' }, after); assert.match(logs.at(-1), /after spawn/)
+  // replay-safe like the engine's: once called, next(e) returns the first result without spawning again
+  let first; const replay = Object.assign(async () => first ??= (calls++, { model: 'x' }), { called: false })
+  await replay(); replay.called = true
+  const r = await fallback($, { description: 't', prompt: 'x' }, replay)
+  assert.match(logs.at(-1), /after spawn/); assert.equal(calls, 1); assert.equal(r, first)
   const den = await spawn({ prompt: '[tier:deep] x' }, { usage: [] }).catch(e => e)
   assert.ok(den.logs)
   let hook; register((ev, h) => { hook = h; return { catch() {} } })
   const lg = []; await hook({ model: { classify: async () => {} }, session: { usage: async () => ({ rateLimits: [] }) }, ui: { log: t => lg.push(t) } },
     { description: 't', prompt: '[tier:deep] x', fork: false }, async () => ({ deny: 'engine said no' }))
   assert.match(lg[0], /DENIED by engine: engine said no/)
+})
+
+test('delta review: narrower keywords, explicit [tier] beats implicit floor, unknown explicit model kept', () => {
+  for (const p of ['count tokens in the file', 'fix dependency injection in a test', 'run it in the sandbox dir'])
+    assert.equal(d(p, { classified: 'light' }).effective, 'light', p)
+  for (const p of ['rotate the API token', 'SQL injection in search', 'sandbox escape check'])
+    assert.equal(d(p, { classified: 'light' }).effective, 'standard', p)
+  assert.equal(d('[tier:light] review the README typo').effective, 'light')
+  assert.equal(d('review the README typo', { classified: 'light' }).effective, 'standard')
+  const k = d('review the diff', { model: 'inherit' })
+  assert.equal(k.action, 'pass'); assert.match(k.reasons.join(), /unknown tier kept/)
+  assert.equal(d('[min-tier:standard] review the diff', { model: 'inherit' }).model, 'sonnet')
+  assert.doesNotMatch(d('x', { model: 'opus', usage: known(10) }).reasons.join(), /limit policy/)
+  assert.match(d('x', { model: 'opus', usage: known(90) }).reasons.join(), /limit policy not applied/)
 })

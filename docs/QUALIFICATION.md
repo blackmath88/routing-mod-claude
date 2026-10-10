@@ -11,7 +11,7 @@ Status of the routing hook for use by the shared mobile queue. Kinds: **verified
 - The repo's README/LIFECYCLE still name 2.1.287 as known-good; nothing was run on that version.
 
 ## Tests
-- `node --test tests/*.test.mjs` (15 tests) — the routing decision (explicit tiers, classification and its fallback, explicit model, forks, floors, `on-limit` policies, unknown usage, the 85 % boundary, requested/effective/observed log line) and the hook wiring with a fake `$`.
+- `node --test tests/*.test.mjs` (16 tests) — the routing decision (explicit tiers, classification and its fallback, explicit model, forks, floors, `on-limit` policies, unknown usage, the 85 % boundary, requested/effective/observed log line) and the hook wiring with a fake `$`.
 - `claude plugin test .` (8 tests, run in this container) — `tests/engine.test.ts` against the real engine, with the classifier, usage, log and spawn stubbed beneath the plugin: routing to opus, no downgrade for security review at 92 %, visible downgrade for ordinary work, `on-limit:stop` refusal, empty `rateLimits` = unknown, classifier and explicit model, observed-model mismatch flag.
 - **Fork:** the test kit's `$.agent.spawn` cannot raise a real fork (`fork` arrives undefined), so fork handling is covered only by the Node tests with a fake engine.
 
@@ -25,3 +25,5 @@ Status of the routing hook for use by the shared mobile queue. Kinds: **verified
 
 ## Supplementary review (not independent)
 A same-model, context-isolated read-only pass on `8460d6c` returned REVISE (2 High, 4 Medium, 8 Low). Fixed in the next commit with tests: widened keywords, implicit floor for protected work (explicit model and classifier paths), unknown model under a floor raised, malformed floor/limit tags refused, conflicting tags logged (strictest wins), `.catch` refuses guarded tasks and never re-spawns after `next()`, engine denials logged, accurate keep reason, unverifiable observed tier flagged, fork tag noted. Open: `percentUsed` scale (0–100 per the types) untested against a live engine; tags quoted inside code text are still honoured.
+
+A second same-model delta pass on `f3c70a4` returned REVISE: implicit floor overriding an explicit model of unknown tier, keyword false positives (`tokens`, `injection`, `sandbox`), an always-on log note and an over-broad `.catch` guard. All fixed with tests. Its claim that `.catch` re-spawns after `next()` contradicts the engine contract (`next` is replay-safe in `.catch`: when `called`, `next(e)` resolves to the first result); the test now models that contract and asserts a single spawn. That contract itself was read from the 2.1.296 types, not exercised against the real engine.

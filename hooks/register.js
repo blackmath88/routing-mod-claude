@@ -17,8 +17,8 @@ const TAG = /\[tier:(light|standard|deep)\]/i
 const MIN_TAG = /\[min-tier:(light|standard|deep)\]/i
 const LIMIT_TAG = /\[on-limit:(step-down|keep|stop)\]/i
 const ALL_TAGS = /\[(?:tier|min-tier|on-limit):[a-z-]+\]/gi
-const PROTECTED = /\b(secur(?:e|ity|ing)|vulnerabilit(?:y|ies)|threat(?:-model)?s?|exploits?|pen-?test(?:ing)?|secrets?|credentials?|tokens?|permissions?|privacy|sandbox(?:ing)?|injection|xss|csrf|ssrf|oauth|auth(?:n|z|entication|orization)?|crypto(?:graphy)?|architecture|architectural|review(?:s|er|ers|ing)?|audit(?:s|ing)?)\b/i
-const PROTECTED_FLOOR = 'standard' // protected work without an explicit [min-tier] is never routed below this
+const PROTECTED = /\b(secur(?:e|ity|ing)|vulnerabilit(?:y|ies)|threat(?:-model)?s?|exploits?|pen-?test(?:ing)?|secrets?|credentials?|(?:auth|access|api|session|bearer|refresh)[- ]tokens?|permissions?|privacy|sandbox(?:ing|[- ]escape)|(?:sql|command|prompt|code|shell)[- ]injection|xss|csrf|ssrf|oauth|auth(?:n|z|entication|orization)?|crypto(?:graphy)?|architecture|architectural|review(?:s|er|ers|ing)?|audit(?:s|ing)?)\b/i
+const PROTECTED_FLOOR = 'standard' // protected work without [min-tier] or [tier] tags is never routed below this
 const ANY_TAG = /\[\s*(tier|min-tier|on-limit)\s*:\s*([^\]]*)\]/gi
 const RETURN_RULE =
   '\n\nWhen done, reply with a summary under 150 words: what you changed (files), ' +
@@ -75,7 +75,9 @@ export function decide(input) {
   const reasons = []
   const isProtected = PROTECTED.test(`${input.description ?? ''}\n${t.clean}`)
   let floor = t.floor
-  if (!floor && isProtected) { floor = PROTECTED_FLOOR; reasons.push(`protected work: implicit floor ${PROTECTED_FLOOR}`) }
+  // An explicit [tier] tag is the plan author's choice and beats the keyword-based implicit floor.
+  const implicitFloor = !floor && !t.tier && isProtected
+  if (implicitFloor) { floor = PROTECTED_FLOOR; reasons.push(`protected work: implicit floor ${PROTECTED_FLOOR}`) }
   if (t.conflicts.length) reasons.push(`conflicting tags (${t.conflicts.join('; ')}): strictest used`)
   const base = { floor, onLimit: t.onLimit, usage, reasons }
   if (t.malformed.some(m => /min-tier|on-limit/i.test(m))) {
@@ -100,11 +102,12 @@ export function decide(input) {
   if (!t.tier && input.model) {
     const mt = tierOfModel(input.model)
     const requested = { tier: mt, source: `explicit model ${input.model}` }
-    if (floor && (mt === undefined || rank(mt) < rank(floor))) {
+    if (floor && (rank(mt) < rank(floor) && mt !== undefined || mt === undefined && !implicitFloor)) {
       reasons.push(`explicit model ${mt === undefined ? 'of unknown tier' : 'below the floor'}: raised to ${floor}`)
       return { ...base, action: 'route', requested, effective: floor, model: TIERS[floor], prompt: t.clean + RETURN_RULE }
     }
-    reasons.push('explicit model: limit policy not applied')
+    if (mt === undefined && implicitFloor) reasons.push('explicit model of unknown tier kept (implicit floor not verifiable)')
+    if (usage.state === 'known' && usage.percent >= LIMIT_PERCENT) reasons.push('explicit model: limit policy not applied')
     return { ...base, action: 'pass', requested, effective: mt, model: input.model }
   }
 
@@ -167,9 +170,10 @@ export function register(on) {
     // A routing failure is reported, never silent. A task with a floor or [on-limit:stop] is refused rather than
     // run unrouted; anything else proceeds on the engine's own choice. A failure after next() returns its result.
     const t = parseTags(e.prompt)
-    const guarded = t.floor || t.onLimit === 'stop' || t.malformed.length || PROTECTED.test(`${e.description}\n${t.clean}`)
+    // next is replay-safe in .catch (engine contract): when called, next(e) resolves to the first result, it does not spawn again.
+    const guarded = t.floor || t.onLimit === 'stop' || t.malformed.some(m => /min-tier|on-limit/i.test(m)) || (!t.tier && PROTECTED.test(`${e.description}\n${t.clean}`))
     try { $.ui.log(`${e.description} · routing-mod FAILED: ${next.called ? 'after spawn' : guarded ? 'spawn refused (floor/stop/protected)' : 'spawn left unrouted (engine default model)'}`) } catch {}
     if (next.called) return next(e)
-    return guarded ? { deny: 'routing-mod: routing failed for a task with a quality floor or on-limit:stop; not started unrouted.' } : next(e)
+    return guarded ? { deny: 'routing-mod: routing failed for a task with a quality floor, on-limit:stop or protected (security/architecture/review) work; not started unrouted.' } : next(e)
   })
 }
