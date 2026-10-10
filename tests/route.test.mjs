@@ -1,0 +1,134 @@
+// Portable tests of the routing decision (no Claude Code needed): node --test tests/
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { decide, describe, summarizeUsage, parseTags, tierOfModel, register, LIMIT_PERCENT } from '../hooks/register.js'
+
+const known = percent => ({ state: 'known', percent, kind: 'five_hour' })
+const unknown = { state: 'unknown', why: 'no rate-limit reading' }
+const d = (prompt, extra = {}) => decide({ prompt, description: 'task', usage: known(10), ...extra })
+
+test('explicit tiers map to models and strip the tag', () => {
+  for (const [tier, model] of [['light', 'haiku'], ['standard', 'sonnet'], ['deep', 'opus']]) {
+    const r = d(`[tier:${tier}] do it`)
+    assert.equal(r.action, 'route'); assert.equal(r.model, model); assert.equal(r.effective, tier)
+    assert.deepEqual(r.requested, { tier, source: 'tag' })
+    assert.ok(r.prompt.startsWith('do it') && !r.prompt.includes('[tier'))
+  }
+})
+
+test('untagged: classification used when valid, otherwise standard with the reason visible', () => {
+  assert.deepEqual(d('fix', { classified: 'deep' }).requested, { tier: 'deep', source: 'classified' })
+  for (const bad of [undefined, 'bogus', '']) {
+    const r = d('fix', { classified: bad })
+    assert.equal(r.effective, 'standard'); assert.match(r.requested.source, /classification unavailable/)
+  }
+})
+
+test('explicit model without a tag is respected; a tag still wins over a model', () => {
+  const r = d('fix', { model: 'claude-haiku-5-5' })
+  assert.equal(r.action, 'pass'); assert.equal(r.requested.tier, 'light')
+  assert.equal(d('[tier:deep] fix', { model: 'haiku' }).model, 'opus')
+})
+
+test('explicit model below [min-tier] is raised; an unknown model id is passed and flagged', () => {
+  const r = d('[min-tier:deep] review auth', { model: 'sonnet' })
+  assert.equal(r.action, 'route'); assert.equal(r.model, 'opus'); assert.match(r.reasons.join(), /raised/)
+  const u = d('[min-tier:deep] x', { model: 'some-other-model' })
+  assert.equal(u.action, 'pass'); assert.match(u.reasons.join(), /not verifiable/)
+})
+
+test('forks pass untouched (they inherit), unless a floor the parent model cannot meet', () => {
+  const p = d('[tier:light] x', { fork: true, parentModel: 'claude-sonnet-5-5' })
+  assert.equal(p.action, 'pass'); assert.equal(p.effective, 'standard')
+  assert.equal(d('[min-tier:standard] x', { fork: true, parentModel: 'opus' }).action, 'pass')
+  const r = d('[min-tier:deep] security review', { fork: true, parentModel: 'claude-sonnet-5-5' })
+  assert.equal(r.action, 'deny'); assert.match(r.deny, /non-fork/)
+  assert.equal(d('[min-tier:deep] x', { fork: true, parentModel: undefined }).action, 'deny')
+})
+
+test('usage unavailable is "unknown": no limit protection, no invented figures', () => {
+  for (const u of [unknown, undefined]) {
+    const r = decide({ prompt: '[tier:deep] x', description: 't', usage: u })
+    assert.equal(r.effective, 'deep'); assert.equal(r.usage.state, 'unknown')
+    assert.match(r.reasons.join(), /usage unknown/)
+  }
+  assert.deepEqual(summarizeUsage([]), unknown)
+  assert.deepEqual(summarizeUsage(undefined), unknown)
+  assert.deepEqual(summarizeUsage([{ kind: 'x', percentUsed: 'n/a' }]), unknown)
+  assert.deepEqual(summarizeUsage([{ kind: 'five_hour', percentUsed: 40 }, { kind: 'seven_day', percentUsed: 91.5 }]),
+    { state: 'known', percent: 91.5, kind: 'seven_day' })
+  const keys = Object.keys(d('[tier:deep] x'))
+  assert.ok(!keys.some(k => /sav|cost|quota|token/i.test(k)), `no savings/quota fields: ${keys}`)
+})
+
+test(`below ${LIMIT_PERCENT}% nothing changes; at/above, ordinary work steps down visibly`, () => {
+  assert.equal(d('[tier:deep] refactor', { usage: known(84.9) }).effective, 'deep')
+  const r = d('[tier:deep] refactor the parser', { usage: known(85) })
+  assert.equal(r.effective, 'standard'); assert.equal(r.requested.tier, 'deep')
+  assert.match(r.reasons.join(), /DOWNGRADED deep -> standard/)
+  assert.equal(d('[tier:light] x', { usage: known(99) }).effective, 'light')
+})
+
+test('security/architecture/review work is never stepped down silently (default keep)', () => {
+  for (const p of ['[tier:deep] security review of the login flow', '[tier:deep] architecture decision', '[tier:deep] Review PR 12']) {
+    const r = d(p, { usage: known(92) })
+    assert.equal(r.effective, 'deep', p); assert.match(r.reasons.join(), /no downgrade/)
+  }
+  assert.equal(d('[tier:deep] update the author field', { usage: known(92) }).effective, 'standard')
+})
+
+test('[min-tier] floors and [on-limit] policies', () => {
+  assert.equal(d('[tier:light][min-tier:deep] x').effective, 'deep')
+  assert.equal(d('[tier:deep][min-tier:deep] tidy', { usage: known(95) }).effective, 'deep')
+  assert.equal(d('[tier:deep][min-tier:standard] tidy', { usage: known(95) }).effective, 'standard')
+  assert.equal(d('[tier:deep][on-limit:keep] tidy', { usage: known(95) }).effective, 'deep')
+  assert.equal(d('[tier:deep][on-limit:step-down] security review', { usage: known(95) }).effective, 'standard')
+  const s = d('[tier:deep][on-limit:stop] security review', { usage: known(95) })
+  assert.equal(s.action, 'deny'); assert.match(s.deny, /on-limit:stop/)
+  assert.equal(d('[tier:deep][on-limit:stop] x', { usage: unknown }).action, 'route')
+})
+
+test('requested vs effective vs observed are all in the log line, mismatch flagged', () => {
+  const r = d('[tier:deep] refactor', { usage: known(90) })
+  const line = describe(r, 'task', 'claude-opus-5-5')
+  assert.match(line, /requested deep \(tag\) → effective standard \(sonnet\) · observed claude-opus-5-5 \[OBSERVED != EFFECTIVE\]/)
+  assert.doesNotMatch(describe(r, 'task', 'claude-sonnet-5-5'), /OBSERVED !=/)
+  assert.match(describe(d('[tier:deep] x', { usage: unknown }), 't', 'claude-opus-5-5'), /usage unknown/)
+})
+
+test('helpers', () => {
+  assert.deepEqual(parseTags('[TIER:Deep] [min-tier:standard] [on-limit:stop] go'), { tier: 'deep', floor: 'standard', onLimit: 'stop', clean: 'go' })
+  assert.equal(tierOfModel('claude-opus-5-5'), 'deep'); assert.equal(tierOfModel('gpt-x'), undefined)
+})
+
+// The hook wiring, driven with a fake engine `$` (shape from the 2.1.296 types; not the real engine).
+async function spawn(e, { classify, usage, observed } = {}) {
+  let hook, fallback; register((ev, h) => { assert.equal(ev, 'agent.spawn'); hook = h; return { catch: c => { fallback = c } } })
+  const logs = []; const seen = []
+  const $ = {
+    model: { classify: async () => { if (classify instanceof Error) throw classify; return classify } },
+    session: { usage: async () => { if (usage instanceof Error) throw usage; return { rateLimits: usage ?? [] } } },
+    ui: { log: t => logs.push(t) },
+  }
+  const result = await hook($, { description: 'task', fork: false, parentModel: 'claude-sonnet-5-5', ...e },
+    async x => { seen.push(x); return { model: observed ?? x.model ?? 'claude-sonnet-5-5' } })
+  return { result, logs, seen }
+}
+
+test('hook: usage() throwing is unknown, classify() throwing falls back, deny skips next()', async () => {
+  const a = await spawn({ prompt: 'fix a bug' }, { classify: new Error('x'), usage: new Error('y') })
+  assert.equal(a.seen[0].model, 'sonnet'); assert.match(a.logs[0], /usage unknown \(usage unavailable\)/)
+  const b = await spawn({ prompt: '[tier:deep][on-limit:stop] x' }, { usage: [{ kind: 'five_hour', percentUsed: 97 }] })
+  assert.ok(b.result.deny); assert.equal(b.seen.length, 0); assert.match(b.logs[0], /DENIED/)
+  const c = await spawn({ prompt: '[tier:deep] refactor' }, { usage: [{ kind: 'five_hour', percentUsed: 97 }], observed: 'claude-opus-5-5' })
+  assert.match(c.logs[0], /OBSERVED != EFFECTIVE/)
+  const f = await spawn({ prompt: '[tier:light] x', fork: true })
+  assert.equal(f.seen[0].prompt, '[tier:light] x')
+})
+
+test('hook registers a .catch that logs the failure and proceeds unrouted', async () => {
+  let fallback; register((ev, h) => ({ catch: c => { fallback = c } }))
+  const logs = []
+  const r = await fallback({ ui: { log: t => logs.push(t) } }, { description: 'task', prompt: '[tier:deep] x' }, async e => ({ model: 'inherited', e }))
+  assert.equal(r.model, 'inherited'); assert.match(logs[0], /routing-mod FAILED/)
+})
