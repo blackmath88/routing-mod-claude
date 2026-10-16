@@ -1,4 +1,14 @@
+<!-- BEGIN public-repo-header -->
+<div align="center">
+
 # routing-mod-claude
+
+<a href="https://github.com/blackmath88/routing-mod-claude"><img alt="Primary language: Shell" src="https://img.shields.io/badge/language-Shell-526078?style=flat"></a>
+<a href="https://github.com/blackmath88/routing-mod-claude#readme"><img alt="README" src="https://img.shields.io/badge/docs-readme-16796f?style=flat"></a>
+<a href="https://github.com/blackmath88/routing-mod-claude/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/blackmath88/routing-mod-claude?style=flat&amp;color=737373"></a>
+
+</div>
+<!-- END public-repo-header -->
 
 Claude Code mod: plan in chat, route execution by tier.
 
